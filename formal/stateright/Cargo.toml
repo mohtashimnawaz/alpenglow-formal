@@ -1,0 +1,21 @@
+[package]
+name = "alpenglow-stateright"
+version = "0.2.0"
+edition = "2021"
+authors = ["Alpenglow Formal Verification Team"]
+description = "Formal verification of Solana's Alpenglow consensus protocol using Stateright"
+license = "Apache-2.0"
+repository = "https://github.com/username/alpenglow-formal"
+
+[[bin]]
+name = "explorer"
+path = "src/bin/explorer.rs"
+
+[dependencies]
+stateright = "0.31.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["full"] }
+criterion = { version = "0.5", features = ["html_reports"] }
