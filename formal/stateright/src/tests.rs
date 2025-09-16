@@ -1,5 +1,5 @@
 use crate::*;
-use stateright::{Model, Checker};
+use stateright::Model;
 use std::collections::HashMap;
 
 fn create_test_model() -> AlpenglowState {
