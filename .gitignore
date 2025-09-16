@@ -1,0 +1,128 @@
+# Alpenglow Formal Verification Project - .gitignore
+
+# =============================================================================
+# Rust (Stateright Model)
+# =============================================================================
+
+# Compiled files
+target/
+Cargo.lock
+
+# Rust analyzer cache
+.rust-analyzer/
+
+# IDE files (VS Code, IntelliJ, etc.)
+.vscode/
+.idea/
+*.iml
+
+# =============================================================================
+# TLA+ (TLC Model Checker)
+# =============================================================================
+
+# TLC generated files
+*.out
+states/
+*.st
+*.fp
+*.chkpt
+
+# TLA+ Toolbox workspace files
+.metadata/
+.toolbox/
+*.launch
+*.project
+*.properties
+
+# TLC temporary and cache files
+MC.tla
+MC.cfg
+*.dot
+*.ps
+*.pdf
+
+# =============================================================================
+# General Development Files
+# =============================================================================
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*~
+*.swp
+*.swo
+*.tmp
+*.temp
+.#*
+#*#
+
+# Log files
+*.log
+logs/
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# =============================================================================
+# Documentation Build Artifacts
+# =============================================================================
+
+# Markdown processors
+*.html
+*.pdf
+!README.html
+
+# LaTeX build artifacts
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+*.bbl
+*.blg
+
+# =============================================================================
+# Project Specific
+# =============================================================================
+
+# Custom test outputs
+test_results/
+verification_reports/
+
+# Performance profiling
+perf.data*
+flamegraph.svg
+
+# Custom scripts output
+scripts/output/
+
+# =============================================================================
+# Keep Important Files (Negated Patterns)
+# =============================================================================
+
+# Always include key project files
+!README.md
+!LICENSE
+!TECHNICAL_REPORT.md
+!Cargo.toml
+!*.tla
+!*.cfg
+
+# Include source code
+!src/
+!formal/
+!*.rs
+
+# Include documentation
+!docs/
