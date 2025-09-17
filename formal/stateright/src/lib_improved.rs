@@ -26,6 +26,8 @@ pub struct AlpenglowState {
     pub timeouts: HashMap<NodeId, HashMap<Slot, TimeoutInfo>>,
     pub status: HashMap<NodeId, NodeStatus>,
     pub network_partition: Option<NetworkPartition>,
+    pub byzantine_coalitions: Vec<ByzantineCoalition>,
+    pub coalition_state: HashMap<usize, CoalitionState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -52,9 +54,79 @@ pub enum NodeStatus {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ByzantineStrategy {
+    // Basic Byzantine behaviors
     Equivocation,    // Vote for multiple blocks
     WithholdVotes,   // Don't participate
     RandomVotes,     // Vote randomly
+    
+    // Advanced sophisticated Byzantine behaviors
+    SelectiveEquivocation {
+        /// Only equivocate when the node has high stake influence
+        min_stake_threshold: StakeAmount,
+        /// Target specific slots for maximum disruption
+        target_slots: Vec<Slot>,
+    },
+    AdaptiveBehavior {
+        /// Switch strategies based on network conditions
+        primary_strategy: Box<ByzantineStrategy>,
+        fallback_strategy: Box<ByzantineStrategy>,
+        /// Trigger threshold (e.g., number of timeouts)
+        adaptation_threshold: u32,
+    },
+    CoalitionAttack {
+        /// Coordinate with other Byzantine nodes
+        coalition_members: Vec<NodeId>,
+        /// Attack strategy for the coalition
+        attack_type: CoalitionAttackType,
+    },
+    TimingAttack {
+        /// Delay votes to disrupt timing assumptions
+        delay_votes: bool,
+        /// Maximum delay in milliseconds
+        max_delay: u64,
+        /// Target path to attack (Fast/Slow)
+        target_path: Option<VotePath>,
+    },
+    StakeBasedAttack {
+        /// Use economic power to maximize damage
+        reserve_stake_for_critical_slots: bool,
+        /// Minimum stake to activate attack
+        activation_threshold: StakeAmount,
+        /// Economic incentive threshold
+        min_profit_margin: StakeAmount,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CoalitionAttackType {
+    /// All coalition members vote for different blocks to split the network
+    SplitVote {
+        target_blocks: Vec<BlockId>,
+    },
+    /// Coalition withholds votes until last moment then floods network
+    DelayedFlood {
+        delay_until_slot: Slot,
+    },
+    /// Coalition targets specific high-value slots for maximum disruption
+    StrategicTargeting {
+        high_priority_slots: Vec<Slot>,
+        disruption_threshold: f64, // Minimum disruption probability
+    },
+    /// Coalition attempts to manipulate certificate generation
+    CertificateManipulation {
+        target_path: VotePath,
+        manipulation_type: CertManipulationType,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CertManipulationType {
+    /// Prevent certificate formation by withholding critical votes
+    PreventCertification,
+    /// Create conflicting certificates for same slot
+    ConflictingCertificates,
+    /// Delay certificate formation to cause timeouts
+    DelayedCertification { delay_slots: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Eq, Hash)]
@@ -95,6 +167,55 @@ pub struct NetworkPartition {
     pub started_at: Timestamp,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ByzantineCoalition {
+    pub members: Vec<NodeId>,
+    pub strategy: CoalitionAttackType,
+    pub coordination_history: Vec<CoordinationEvent>,
+    pub total_stake: StakeAmount,
+    pub formation_time: Timestamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CoordinationEvent {
+    pub slot: Slot,
+    pub event_type: EventType,
+    pub participants: Vec<NodeId>,
+    pub timestamp: Timestamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum EventType {
+    CoordinatedVote { target_block: BlockId },
+    CoordinatedWithhold { target_slot: Slot },
+    MessageFlood { message_count: u32 },
+    TimingAttack { delay_ms: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CoalitionState {
+    pub active: bool,
+    pub current_phase: AttackPhase,
+    pub success_metrics: AttackMetrics,
+    pub adaptation_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AttackPhase {
+    Preparation,
+    Execution,
+    Completion,
+    Adaptation,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AttackMetrics {
+    pub slots_disrupted: u32,
+    pub certificates_prevented: u32,
+    pub timeouts_caused: u32,
+    pub economic_damage: StakeAmount,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum AlpenglowAction {
     Vote { node: NodeId, slot: Slot, block: BlockId, path: VotePath },
@@ -105,6 +226,11 @@ pub enum AlpenglowAction {
     AdvanceTime { delta: Timestamp },
     NetworkPartition { nodes_a: HashSet<NodeId>, nodes_b: HashSet<NodeId> },
     HealPartition,
+    // Advanced coalition actions
+    FormCoalition { members: Vec<NodeId>, strategy: CoalitionAttackType },
+    CoordinateAttack { coalition_index: usize, target_slot: Slot },
+    AdaptStrategy { node: NodeId, new_strategy: ByzantineStrategy, reason: String },
+    TimingManipulation { node: NodeId, delay_ms: u64, target_slot: Slot },
 }
 
 impl AlpenglowState {
@@ -141,6 +267,8 @@ impl AlpenglowState {
             timeouts,
             status,
             network_partition: None,
+            byzantine_coalitions: Vec::new(),
+            coalition_state: HashMap::new(),
         }
     }
     
@@ -209,6 +337,11 @@ impl Hash for AlpenglowState {
                         ByzantineStrategy::Equivocation => 0u8.hash(state),
                         ByzantineStrategy::WithholdVotes => 1u8.hash(state),
                         ByzantineStrategy::RandomVotes => 2u8.hash(state),
+                        ByzantineStrategy::SelectiveEquivocation { .. } => 3u8.hash(state),
+                        ByzantineStrategy::AdaptiveBehavior { .. } => 4u8.hash(state),
+                        ByzantineStrategy::CoalitionAttack { .. } => 5u8.hash(state),
+                        ByzantineStrategy::TimingAttack { .. } => 6u8.hash(state),
+                        ByzantineStrategy::StakeBasedAttack { .. } => 7u8.hash(state),
                     }
                 },
                 NodeStatus::Crashed { since } => {
@@ -308,6 +441,80 @@ impl Model for AlpenglowState {
         if state.network_partition.is_some() {
             actions.push(AlpenglowAction::HealPartition);
         }
+        
+        // Coalition formation and coordination
+        let byzantine_nodes: Vec<_> = state.nodes.iter()
+            .filter(|&&node| matches!(state.status[&node], NodeStatus::Byzantine(_)))
+            .cloned()
+            .collect();
+            
+        if byzantine_nodes.len() >= 2 {
+            // Form coalitions of different sizes
+            for size in 2..=std::cmp::min(byzantine_nodes.len(), 4) {
+                if byzantine_nodes.len() >= size {
+                    let coalition_members = byzantine_nodes[0..size].to_vec();
+                    
+                    // Different coalition strategies
+                    actions.push(AlpenglowAction::FormCoalition {
+                        members: coalition_members.clone(),
+                        strategy: CoalitionAttackType::SplitVote { 
+                            target_blocks: vec![0, 1, 2] 
+                        },
+                    });
+                    
+                    actions.push(AlpenglowAction::FormCoalition {
+                        members: coalition_members,
+                        strategy: CoalitionAttackType::StrategicTargeting { 
+                            high_priority_slots: vec![1, 3, 5],
+                            disruption_threshold: 0.5,
+                        },
+                    });
+                }
+            }
+        }
+        
+        // Coalition coordination actions
+        for (coalition_index, coalition_state) in &state.coalition_state {
+            if coalition_state.active {
+                for slot in state.current_slot..=std::cmp::min(state.current_slot + 1, 5) {
+                    actions.push(AlpenglowAction::CoordinateAttack {
+                        coalition_index: *coalition_index,
+                        target_slot: slot,
+                    });
+                }
+            }
+        }
+        
+        // Strategy adaptation for Byzantine nodes
+        for &node in &byzantine_nodes {
+            if let NodeStatus::Byzantine(current_strategy) = &state.status[&node] {
+                // Adapt based on current conditions
+                match current_strategy {
+                    ByzantineStrategy::Equivocation => {
+                        actions.push(AlpenglowAction::AdaptStrategy {
+                            node,
+                            new_strategy: ByzantineStrategy::SelectiveEquivocation {
+                                min_stake_threshold: 100,
+                                target_slots: vec![2, 4],
+                            },
+                            reason: "Escalating attack".to_string(),
+                        });
+                    }
+                    ByzantineStrategy::WithholdVotes => {
+                        actions.push(AlpenglowAction::AdaptStrategy {
+                            node,
+                            new_strategy: ByzantineStrategy::TimingAttack {
+                                delay_votes: true,
+                                max_delay: 500,
+                                target_path: Some(VotePath::Fast),
+                            },
+                            reason: "Switching to timing attack".to_string(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
     
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
@@ -340,29 +547,7 @@ impl Model for AlpenglowState {
             AlpenglowAction::ByzantineVote { node, strategy, slot } => {
                 if let NodeStatus::Byzantine(_) = state.status[&node] {
                     let stake = *state.stake_distribution.get(&node).unwrap_or(&0);
-                    match strategy {
-                        ByzantineStrategy::Equivocation => {
-                            // Vote for multiple blocks
-                            for block in 0..2 {
-                                let vote = Vote { node, slot, block, path: VotePath::Fast, stake };
-                                if let Some(node_votes) = new_state.votes.get_mut(&node) {
-                                    if let Some(slot_votes) = node_votes.get_mut(&slot) {
-                                        slot_votes.push(vote);
-                                    }
-                                }
-                            }
-                        }
-                        ByzantineStrategy::RandomVotes => {
-                            let block = (node + slot) % 2;
-                            let vote = Vote { node, slot, block, path: VotePath::Fast, stake };
-                            if let Some(node_votes) = new_state.votes.get_mut(&node) {
-                                if let Some(slot_votes) = node_votes.get_mut(&slot) {
-                                    slot_votes.push(vote);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
+                    self.execute_byzantine_strategy(&mut new_state, node, &strategy, slot, stake);
                 }
             }
             
@@ -473,6 +658,62 @@ impl Model for AlpenglowState {
             AlpenglowAction::HealPartition => {
                 new_state.network_partition = None;
             }
+            
+            AlpenglowAction::FormCoalition { members, strategy } => {
+                let total_stake = members.iter()
+                    .map(|&node| *state.stake_distribution.get(&node).unwrap_or(&0))
+                    .sum();
+                
+                let coalition = ByzantineCoalition {
+                    members: members.clone(),
+                    strategy: strategy.clone(),
+                    coordination_history: Vec::new(),
+                    total_stake,
+                    formation_time: state.global_time,
+                };
+                
+                let coalition_index = new_state.byzantine_coalitions.len();
+                new_state.byzantine_coalitions.push(coalition);
+                new_state.coalition_state.insert(coalition_index, CoalitionState {
+                    active: true,
+                    current_phase: AttackPhase::Preparation,
+                    success_metrics: AttackMetrics {
+                        slots_disrupted: 0,
+                        certificates_prevented: 0,
+                        timeouts_caused: 0,
+                        economic_damage: 0,
+                    },
+                    adaptation_count: 0,
+                });
+            }
+            
+            AlpenglowAction::CoordinateAttack { coalition_index, target_slot } => {
+                if let Some(coalition_state) = new_state.coalition_state.get_mut(&coalition_index) {
+                    coalition_state.current_phase = AttackPhase::Execution;
+                    
+                    if let Some(coalition) = new_state.byzantine_coalitions.get_mut(coalition_index) {
+                        let event = CoordinationEvent {
+                            slot: target_slot,
+                            event_type: EventType::CoordinatedWithhold { target_slot },
+                            participants: coalition.members.clone(),
+                            timestamp: state.global_time,
+                        };
+                        coalition.coordination_history.push(event);
+                    }
+                }
+            }
+            
+            AlpenglowAction::AdaptStrategy { node, new_strategy, reason: _ } => {
+                if let Some(status) = new_state.status.get_mut(&node) {
+                    *status = NodeStatus::Byzantine(new_strategy);
+                }
+            }
+            
+            AlpenglowAction::TimingManipulation { node: _, delay_ms: _, target_slot: _ } => {
+                // Implementation for timing attacks would go here
+                // For now, just advance time to simulate delay effects
+                new_state.global_time += 10;
+            }
         }
         
         Some(new_state)
@@ -566,5 +807,181 @@ impl Model for AlpenglowState {
                 true
             }),
         ]
+    }
+}
+
+impl AlpenglowState {
+    fn execute_byzantine_strategy(
+        &self,
+        state: &mut AlpenglowState,
+        node: NodeId,
+        strategy: &ByzantineStrategy,
+        slot: Slot,
+        stake: StakeAmount,
+    ) {
+        match strategy {
+            ByzantineStrategy::Equivocation => {
+                // Basic equivocation: vote for multiple blocks
+                for block in 0..2 {
+                    let vote = Vote { node, slot, block, path: VotePath::Fast, stake };
+                    self.add_vote_to_state(state, vote);
+                }
+            }
+            
+            ByzantineStrategy::RandomVotes => {
+                // Random voting behavior
+                let block = (node + slot) % 2;
+                let vote = Vote { node, slot, block, path: VotePath::Fast, stake };
+                self.add_vote_to_state(state, vote);
+            }
+            
+            ByzantineStrategy::WithholdVotes => {
+                // Simply don't vote - no action needed
+            }
+            
+            ByzantineStrategy::SelectiveEquivocation { min_stake_threshold, target_slots } => {
+                if stake >= *min_stake_threshold && target_slots.contains(&slot) {
+                    // High-impact equivocation on critical slots
+                    for block in 0..3 {
+                        for path in [VotePath::Fast, VotePath::Slow] {
+                            let vote = Vote { node, slot, block, path, stake };
+                            self.add_vote_to_state(state, vote);
+                        }
+                    }
+                } else {
+                    // Behave honestly to avoid detection
+                    let vote = Vote { node, slot, block: 0, path: VotePath::Fast, stake };
+                    self.add_vote_to_state(state, vote);
+                }
+            }
+            
+            ByzantineStrategy::AdaptiveBehavior { primary_strategy, fallback_strategy, adaptation_threshold } => {
+                let timeout_count = state.timeouts.get(&node)
+                    .and_then(|timeouts| timeouts.get(&slot))
+                    .map(|info| info.count)
+                    .unwrap_or(0);
+                
+                let strategy_to_use = if timeout_count >= *adaptation_threshold {
+                    fallback_strategy.as_ref()
+                } else {
+                    primary_strategy.as_ref()
+                };
+                
+                self.execute_byzantine_strategy(state, node, strategy_to_use, slot, stake);
+            }
+            
+            ByzantineStrategy::CoalitionAttack { coalition_members, attack_type } => {
+                self.execute_coalition_attack(state, node, coalition_members, attack_type, slot, stake);
+            }
+            
+            ByzantineStrategy::TimingAttack { delay_votes, max_delay, target_path } => {
+                if *delay_votes {
+                    // Simulate delay by advancing time
+                    state.global_time += std::cmp::min(*max_delay, 1000);
+                }
+                
+                let path = target_path.clone().unwrap_or(VotePath::Slow);
+                let vote = Vote { node, slot, block: 0, path, stake };
+                self.add_vote_to_state(state, vote);
+            }
+            
+            ByzantineStrategy::StakeBasedAttack { reserve_stake_for_critical_slots, activation_threshold, min_profit_margin: _ } => {
+                if stake >= *activation_threshold {
+                    if *reserve_stake_for_critical_slots && slot % 3 == 0 {
+                        // Critical slot: maximize disruption
+                        for block in 0..3 {
+                            let vote = Vote { node, slot, block, path: VotePath::Fast, stake };
+                            self.add_vote_to_state(state, vote);
+                        }
+                    } else {
+                        // Regular slot: conservative attack
+                        let vote = Vote { node, slot, block: 1, path: VotePath::Fast, stake };
+                        self.add_vote_to_state(state, vote);
+                    }
+                }
+            }
+        }
+    }
+    
+    fn add_vote_to_state(&self, state: &mut AlpenglowState, vote: Vote) {
+        if let Some(node_votes) = state.votes.get_mut(&vote.node) {
+            if let Some(slot_votes) = node_votes.get_mut(&vote.slot) {
+                slot_votes.push(vote);
+            }
+        }
+    }
+    
+    fn execute_coalition_attack(
+        &self,
+        state: &mut AlpenglowState,
+        node: NodeId,
+        coalition_members: &[NodeId],
+        attack_type: &CoalitionAttackType,
+        slot: Slot,
+        stake: StakeAmount,
+    ) {
+        if !coalition_members.contains(&node) {
+            return;
+        }
+        
+        match attack_type {
+            CoalitionAttackType::SplitVote { target_blocks } => {
+                let node_index = coalition_members.iter().position(|&n| n == node).unwrap_or(0);
+                let block = target_blocks.get(node_index % target_blocks.len()).copied().unwrap_or(0);
+                let vote = Vote { node, slot, block, path: VotePath::Fast, stake };
+                self.add_vote_to_state(state, vote);
+            }
+            
+            CoalitionAttackType::DelayedFlood { delay_until_slot } => {
+                if slot >= *delay_until_slot {
+                    // Flood with multiple votes
+                    for block in 0..2 {
+                        for path in [VotePath::Fast, VotePath::Slow] {
+                            let vote = Vote { node, slot, block, path, stake };
+                            self.add_vote_to_state(state, vote);
+                        }
+                    }
+                }
+            }
+            
+            CoalitionAttackType::StrategicTargeting { high_priority_slots, disruption_threshold: _ } => {
+                if high_priority_slots.contains(&slot) {
+                    // Maximum disruption on targeted slots
+                    for block in 0..3 {
+                        let vote = Vote { node, slot, block, path: VotePath::Fast, stake };
+                        self.add_vote_to_state(state, vote);
+                    }
+                } else {
+                    // Normal behavior to avoid detection
+                    let vote = Vote { node, slot, block: 0, path: VotePath::Fast, stake };
+                    self.add_vote_to_state(state, vote);
+                }
+            }
+            
+            CoalitionAttackType::CertificateManipulation { target_path, manipulation_type } => {
+                match manipulation_type {
+                    CertManipulationType::PreventCertification => {
+                        // Withhold votes to prevent certificate formation
+                        // No vote is cast
+                    }
+                    
+                    CertManipulationType::ConflictingCertificates => {
+                        // Vote for different blocks to create conflicts
+                        let block = (node + slot) % 3;
+                        let vote = Vote { node, slot, block, path: target_path.clone(), stake };
+                        self.add_vote_to_state(state, vote);
+                    }
+                    
+                    CertManipulationType::DelayedCertification { delay_slots: _ } => {
+                        // Delay voting by a few slots
+                        if slot > 2 {
+                            let delayed_slot = slot - 2;
+                            let vote = Vote { node, slot: delayed_slot, block: 0, path: target_path.clone(), stake };
+                            self.add_vote_to_state(state, vote);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
