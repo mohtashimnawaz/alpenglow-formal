@@ -8,3 +8,12 @@ mod tests;
 
 #[cfg(test)]
 mod tests_byzantine;
+
+#[cfg(test)]
+mod tests_network;
+
+#[cfg(test)]
+mod tests_statistical;
+
+#[cfg(test)]
+mod tests_scalability;
