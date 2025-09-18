@@ -15,6 +15,72 @@ pub type BlockId = u32;
 pub type StakeAmount = u64;
 pub type Timestamp = u64;
 pub type Round = u32;
+pub type RewardAmount = u64;
+pub type SlashingAmount = u64;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Hash)]
+pub struct Block {
+    pub id: BlockId,
+    pub parent: BlockId,
+}
+
+// Economic incentive structures
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EconomicState {
+    pub rewards_pool: RewardAmount,
+    pub total_slashed: SlashingAmount,
+    pub validator_balances: HashMap<NodeId, StakeAmount>,
+    pub pending_rewards: HashMap<NodeId, RewardAmount>,
+    pub slashing_evidence: Vec<SlashingEvidence>,
+    pub reward_rate: f64, // Percentage reward per epoch
+    pub slashing_rate: f64, // Percentage slashed for violations
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Hash)]
+pub struct SlashingEvidence {
+    pub evidence_type: SlashingType,
+    pub violator: NodeId,
+    pub slot: Slot,
+    pub evidence_data: SlashingData,
+    pub severity: SlashingSeverity,
+    pub reporter: Option<NodeId>,
+    pub timestamp: Timestamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Hash)]
+pub enum SlashingType {
+    DoubleVoting,
+    LongRangeAttack,
+    InvalidProposal,
+    Equivocation,
+    NetworkDisruption,
+    StakeWithdrawalViolation,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Hash)]
+pub enum SlashingData {
+    DoubleVote { vote1: Vote, vote2: Vote },
+    EquivocationProof { block1: Block, block2: Block },
+    InvalidBlock { block: Block, violation: String },
+    NetworkAttack { attack_details: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Hash)]
+pub enum SlashingSeverity {
+    Minor,     // 1-5% slash
+    Moderate,  // 5-15% slash
+    Severe,    // 15-50% slash
+    Critical,  // 50%+ slash, potential ejection
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RewardDistribution {
+    pub epoch: u64,
+    pub total_rewards: RewardAmount,
+    pub validator_rewards: HashMap<NodeId, RewardAmount>,
+    pub performance_bonuses: HashMap<NodeId, RewardAmount>,
+    pub participation_rewards: HashMap<NodeId, RewardAmount>,
+}
 
 // Additional structures needed for statistical model checking
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Hash)]
@@ -67,6 +133,8 @@ pub struct AlpenglowState {
     pub coalition_state: HashMap<usize, CoalitionState>,
     pub network_state: NetworkSimulationState,
     pub message_queue: MessageQueue,
+    pub economic_state: EconomicState,
+    pub view: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -417,6 +485,15 @@ pub enum AlpenglowAction {
     UpdateLatencyModel { new_model: LatencyModel },
     AdjustBandwidth { from: NodeId, to: NodeId, new_bandwidth: Bandwidth },
     SimulateCongestion { links: Vec<(NodeId, NodeId)>, intensity: f64 },
+    
+    // Economic incentive actions
+    DistributeRewards { epoch: u64, rewards: RewardDistribution },
+    SlashValidator { evidence: SlashingEvidence },
+    WithdrawRewards { node: NodeId, amount: RewardAmount },
+    StakeDeposit { node: NodeId, amount: StakeAmount },
+    StakeWithdrawal { node: NodeId, amount: StakeAmount },
+    ReportSlashing { reporter: NodeId, evidence: SlashingEvidence },
+    UpdateEconomicParameters { new_reward_rate: f64, new_slashing_rate: f64 },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -451,8 +528,8 @@ impl AlpenglowState {
         }
         
         Self {
-            nodes,
-            stake_distribution,
+            nodes: nodes.clone(),
+            stake_distribution: stake_distribution.clone(),
             current_slot: 1,
             global_time: 0,
             ledger: Vec::new(),
@@ -466,6 +543,16 @@ impl AlpenglowState {
             coalition_state: HashMap::new(),
             network_state: NetworkSimulationState::default(),
             message_queue: MessageQueue::default(),
+            economic_state: EconomicState {
+                rewards_pool: nodes.len() as u64 * 1000, // Initial rewards pool
+                total_slashed: 0,
+                validator_balances: stake_distribution.clone(),
+                pending_rewards: HashMap::new(),
+                slashing_evidence: Vec::new(),
+                reward_rate: 0.05, // 5% per epoch
+                slashing_rate: 0.1, // 10% slash rate
+            },
+            view: 0,
         }
     }
     
@@ -553,6 +640,152 @@ impl AlpenglowState {
                 (partition.partition_b.contains(&node1) && partition.partition_b.contains(&node2))
             }
         }
+    }
+    
+    // Economic incentive methods
+    pub fn calculate_epoch_rewards(&self, epoch: u64, participating_nodes: &[NodeId]) -> RewardDistribution {
+        let total_available = self.economic_state.rewards_pool;
+        let epoch_rewards = (total_available as f64 * self.economic_state.reward_rate) as RewardAmount;
+        let per_validator_base = if participating_nodes.is_empty() {
+            0
+        } else {
+            epoch_rewards / participating_nodes.len() as u64
+        };
+        
+        let mut validator_rewards = HashMap::new();
+        let mut performance_bonuses = HashMap::new();
+        let mut participation_rewards = HashMap::new();
+        
+        for &node in participating_nodes {
+            let base_reward = per_validator_base;
+            let stake_ratio = *self.stake_distribution.get(&node).unwrap_or(&0) as f64 / self.total_stake() as f64;
+            let stake_bonus = (base_reward as f64 * stake_ratio * 0.2) as RewardAmount; // 20% stake bonus
+            
+            validator_rewards.insert(node, base_reward);
+            participation_rewards.insert(node, base_reward / 2); // 50% for participation
+            
+            // Performance bonus for honest nodes
+            if matches!(self.status.get(&node), Some(NodeStatus::Honest)) {
+                performance_bonuses.insert(node, stake_bonus);
+            }
+        }
+        
+        RewardDistribution {
+            epoch,
+            total_rewards: epoch_rewards,
+            validator_rewards,
+            performance_bonuses,
+            participation_rewards,
+        }
+    }
+    
+    pub fn apply_slashing(&mut self, evidence: &SlashingEvidence) -> Result<SlashingAmount, String> {
+        let violator = evidence.violator;
+        
+        // Get current stake
+        let current_stake = *self.economic_state.validator_balances.get(&violator).unwrap_or(&0);
+        if current_stake == 0 {
+            return Err("Validator has no stake to slash".to_string());
+        }
+        
+        // Calculate slash amount based on severity
+        let slash_percentage = match evidence.severity {
+            SlashingSeverity::Minor => 0.05,      // 5%
+            SlashingSeverity::Moderate => 0.15,   // 15%
+            SlashingSeverity::Severe => 0.30,     // 30%
+            SlashingSeverity::Critical => 0.50,   // 50%
+        };
+        
+        let slash_amount = (current_stake as f64 * slash_percentage) as SlashingAmount;
+        
+        // Apply slashing
+        let remaining_stake = current_stake.saturating_sub(slash_amount);
+        self.economic_state.validator_balances.insert(violator, remaining_stake);
+        self.economic_state.total_slashed += slash_amount;
+        
+        // Mark as Byzantine if severely slashed
+        if matches!(evidence.severity, SlashingSeverity::Critical) {
+            self.status.insert(violator, NodeStatus::Byzantine(ByzantineStrategy::Equivocation));
+        }
+        
+        // Add to slashing evidence
+        self.economic_state.slashing_evidence.push(evidence.clone());
+        
+        Ok(slash_amount)
+    }
+    
+    pub fn distribute_rewards(&mut self, distribution: &RewardDistribution) -> Result<(), String> {
+        // Verify we have enough rewards in pool
+        if distribution.total_rewards > self.economic_state.rewards_pool {
+            return Err("Insufficient rewards in pool".to_string());
+        }
+        
+        // Distribute rewards to validator balances
+        for (&node, &reward) in &distribution.validator_rewards {
+            *self.economic_state.validator_balances.entry(node).or_insert(0) += reward;
+        }
+        
+        for (&node, &bonus) in &distribution.performance_bonuses {
+            *self.economic_state.validator_balances.entry(node).or_insert(0) += bonus;
+        }
+        
+        for (&node, &participation) in &distribution.participation_rewards {
+            *self.economic_state.validator_balances.entry(node).or_insert(0) += participation;
+        }
+        
+        // Deduct from rewards pool
+        self.economic_state.rewards_pool = self.economic_state.rewards_pool.saturating_sub(distribution.total_rewards);
+        
+        Ok(())
+    }
+    
+    pub fn detect_double_voting(&self, vote1: &Vote, vote2: &Vote) -> Option<SlashingEvidence> {
+        if vote1.node == vote2.node && 
+           vote1.slot == vote2.slot && 
+           vote1.block != vote2.block &&
+           vote1.path == vote2.path {
+            Some(SlashingEvidence {
+                evidence_type: SlashingType::DoubleVoting,
+                violator: vote1.node,
+                slot: vote1.slot,
+                evidence_data: SlashingData::DoubleVote { 
+                    vote1: vote1.clone(), 
+                    vote2: vote2.clone() 
+                },
+                severity: SlashingSeverity::Severe,
+                reporter: None,
+                timestamp: self.global_time,
+            })
+        } else {
+            None
+        }
+    }
+    
+    pub fn validate_economic_invariants(&self) -> Vec<String> {
+        let mut violations = Vec::new();
+        
+        // Check total stake conservation
+        let total_distributed: u64 = self.economic_state.validator_balances.values().sum();
+        let total_original: u64 = self.stake_distribution.values().sum();
+        let expected_total = total_original + self.economic_state.rewards_pool - self.economic_state.total_slashed;
+        
+        if total_distributed > expected_total {
+            violations.push(format!("Stake inflation detected: {} > {}", total_distributed, expected_total));
+        }
+        
+        // Check for negative balances
+        for (&node, &balance) in &self.economic_state.validator_balances {
+            if balance == 0 && self.stake_distribution.contains_key(&node) {
+                violations.push(format!("Node {} has zero balance but is active", node));
+            }
+        }
+        
+        // Check reward pool bounds
+        if self.economic_state.rewards_pool > total_original * 2 {
+            violations.push("Rewards pool suspiciously large".to_string());
+        }
+        
+        violations
     }
 }
 
@@ -992,6 +1225,57 @@ impl Model for AlpenglowState {
                 for (from, to) in links {
                     new_state.network_state.congestion_state.current_utilization.insert((from, to), intensity);
                 }
+            }
+            
+            // Economic incentive actions
+            AlpenglowAction::DistributeRewards { epoch: _, rewards } => {
+                if let Err(e) = new_state.distribute_rewards(&rewards) {
+                    // If distribution fails, log and continue (for now)
+                    eprintln!("Reward distribution failed: {}", e);
+                }
+            }
+            
+            AlpenglowAction::SlashValidator { evidence } => {
+                if let Err(e) = new_state.apply_slashing(&evidence) {
+                    eprintln!("Slashing failed: {}", e);
+                }
+            }
+            
+            AlpenglowAction::WithdrawRewards { node, amount } => {
+                if let Some(balance) = new_state.economic_state.validator_balances.get_mut(&node) {
+                    if *balance >= amount {
+                        *balance -= amount;
+                        // In a real implementation, this would transfer to user's account
+                    }
+                }
+            }
+            
+            AlpenglowAction::StakeDeposit { node, amount } => {
+                *new_state.economic_state.validator_balances.entry(node).or_insert(0) += amount;
+                *new_state.stake_distribution.entry(node).or_insert(0) += amount;
+                if !new_state.nodes.contains(&node) {
+                    new_state.nodes.push(node);
+                }
+            }
+            
+            AlpenglowAction::StakeWithdrawal { node, amount } => {
+                if let Some(balance) = new_state.economic_state.validator_balances.get_mut(&node) {
+                    if *balance >= amount {
+                        *balance -= amount;
+                        if let Some(stake) = new_state.stake_distribution.get_mut(&node) {
+                            *stake = (*stake).saturating_sub(amount);
+                        }
+                    }
+                }
+            }
+            
+            AlpenglowAction::ReportSlashing { reporter: _, evidence } => {
+                new_state.economic_state.slashing_evidence.push(evidence);
+            }
+            
+            AlpenglowAction::UpdateEconomicParameters { new_reward_rate, new_slashing_rate } => {
+                new_state.economic_state.reward_rate = new_reward_rate;
+                new_state.economic_state.slashing_rate = new_slashing_rate;
             }
         }
         
@@ -1683,4 +1967,69 @@ impl AlpenglowState {
         byzantine_resilient && stake_consistent && network_initialized
     }
     
+}
+
+// Model wrapper for easier usage in tests
+#[derive(Clone, Debug, Default)]
+pub struct AlpenglowModel;
+
+impl AlpenglowModel {
+    pub fn new() -> Self {
+        Self
+    }
+    
+    pub fn next_state(&self, state: &AlpenglowState, action: AlpenglowAction) -> Option<AlpenglowState> {
+        // Use the Model trait implementation
+        use stateright::Model;
+        state.next_state(state, action)
+    }
+}
+
+// Include economic incentive tests
+#[cfg(test)]
+mod tests_economic {
+    include!("tests_economic.rs");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_economic_state_basic_functionality() {
+        let nodes = vec![0, 1, 2];
+        let stake_dist = HashMap::from([(0, 1000), (1, 1500), (2, 2000)]);
+        
+        let state = AlpenglowState::new(nodes, stake_dist);
+        
+        // Test basic economic state initialization
+        assert_eq!(state.economic_state.rewards_pool, 3000);
+        assert_eq!(state.economic_state.total_slashed, 0);
+        assert_eq!(state.economic_state.validator_balances.len(), 3);
+        
+        // Test economic invariants hold initially
+        let violations = state.validate_economic_invariants();
+        assert!(violations.is_empty());
+    }
+
+    #[test] 
+    fn test_economic_actions_integration() {
+        let nodes = vec![0, 1];
+        let stake_dist = HashMap::from([(0, 1000), (1, 1500)]);
+        
+        let state = AlpenglowState::new(nodes, stake_dist);
+        let model = AlpenglowModel::new();
+        
+        // Test economic action types can be processed
+        let actions = vec![
+            AlpenglowAction::StakeDeposit { node: 0, amount: 500 },
+            AlpenglowAction::StakeWithdrawal { node: 0, amount: 100 },
+            AlpenglowAction::UpdateEconomicParameters { new_reward_rate: 0.06, new_slashing_rate: 0.12 },
+        ];
+        
+        for action in actions {
+            let result = model.next_state(&state, action);
+            assert!(result.is_some(), "Economic action should produce valid state transition");
+        }
+    }
 }
