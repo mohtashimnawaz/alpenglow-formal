@@ -24,6 +24,48 @@ pub struct Block {
     pub parent: BlockId,
 }
 
+// Rotor erasure coding structures
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ErasureCodedBlock {
+    pub block: Block,
+    pub chunks: Vec<BlockChunk>,
+    pub redundancy_level: f64, // e.g., 1.5 means 50% redundancy
+    pub required_chunks: usize, // minimum chunks needed to reconstruct
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Hash)]
+pub struct BlockChunk {
+    pub chunk_id: u32,
+    pub block_id: BlockId,
+    pub data: Vec<u8>, // Simplified data representation
+    pub checksum: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RelayNode {
+    pub node_id: NodeId,
+    pub stake_weight: StakeAmount,
+    pub reliability_score: f64, // 0.0 to 1.0
+    pub assigned_chunks: Vec<u32>,
+}
+
+// Leader rotation and windowing structures
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Hash)]
+pub struct WindowInfo {
+    pub window_start: Slot,
+    pub window_size: u32,
+    pub finality_depth: u32, // How many slots before finalization
+    pub leader_schedule: Vec<NodeId>, // Ordered list of leaders for this window
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Hash)]
+pub struct LeaderRotation {
+    pub current_leader: NodeId,
+    pub current_slot: Slot,
+    pub rotation_interval: u32, // Slots between leader changes
+    pub leader_history: Vec<(Slot, NodeId)>,
+}
+
 // Economic incentive structures
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EconomicState {
@@ -134,6 +176,14 @@ pub struct AlpenglowState {
     pub network_state: NetworkSimulationState,
     pub message_queue: MessageQueue,
     pub economic_state: EconomicState,
+    // Rotor erasure coding
+    pub erasure_coded_blocks: HashMap<BlockId, ErasureCodedBlock>,
+    pub relay_assignments: HashMap<NodeId, RelayNode>,
+    pub chunk_availability: HashMap<(BlockId, u32), HashSet<NodeId>>, // (block, chunk) -> nodes that have it
+    // Leader rotation and windowing
+    pub current_window: WindowInfo,
+    pub leader_rotation: LeaderRotation,
+    pub finalization_times: HashMap<Slot, Timestamp>, // Track actual finalization times
     pub view: u64,
 }
 
@@ -494,6 +544,18 @@ pub enum AlpenglowAction {
     StakeWithdrawal { node: NodeId, amount: StakeAmount },
     ReportSlashing { reporter: NodeId, evidence: SlashingEvidence },
     UpdateEconomicParameters { new_reward_rate: f64, new_slashing_rate: f64 },
+    
+    // Rotor erasure coding actions
+    PropagateErasureBlock { node: NodeId, erasure_block: ErasureCodedBlock },
+    PropagateChunk { node: NodeId, chunk: BlockChunk, target_nodes: Vec<NodeId> },
+    RequestMissingChunks { node: NodeId, block_id: BlockId, missing_chunks: Vec<u32> },
+    ReconstructBlock { node: NodeId, block_id: BlockId },
+    AssignRelayNodes { block_id: BlockId, relay_assignments: Vec<RelayNode> },
+    
+    // Leader rotation and windowing actions  
+    ProposeBlock { leader: NodeId, slot: Slot, block: Block, window: WindowInfo },
+    RotateLeader { new_leader: NodeId, slot: Slot },
+    UpdateWindow { slot: Slot, window_size: u32, finality_depth: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -552,6 +614,24 @@ impl AlpenglowState {
                 reward_rate: 0.05, // 5% per epoch
                 slashing_rate: 0.1, // 10% slash rate
             },
+            // Initialize Rotor erasure coding
+            erasure_coded_blocks: HashMap::new(),
+            relay_assignments: HashMap::new(),
+            chunk_availability: HashMap::new(),
+            // Initialize leader rotation and windowing
+            current_window: WindowInfo {
+                window_start: 1,
+                window_size: 10, // 10-slot windows by default
+                finality_depth: 2, // 2-slot finality depth
+                leader_schedule: nodes.clone(), // Round-robin initially
+            },
+            leader_rotation: LeaderRotation {
+                current_leader: nodes[0], // First node is initial leader
+                current_slot: 1,
+                rotation_interval: 1, // Rotate every slot
+                leader_history: vec![(1, nodes[0])],
+            },
+            finalization_times: HashMap::new(),
             view: 0,
         }
     }
@@ -786,6 +866,161 @@ impl AlpenglowState {
         }
         
         violations
+    }
+    
+    // Rotor erasure coding methods
+    pub fn create_erasure_coded_block(&self, block: Block, redundancy_level: f64) -> ErasureCodedBlock {
+        let num_chunks = 10; // Base number of chunks
+        let redundant_chunks = (num_chunks as f64 * redundancy_level) as usize;
+        let total_chunks = num_chunks + redundant_chunks;
+        let required_chunks = num_chunks; // Need at least original chunks to reconstruct
+        
+        let mut chunks = Vec::new();
+        for i in 0..total_chunks {
+            chunks.push(BlockChunk {
+                chunk_id: i as u32,
+                block_id: block.id,
+                data: vec![i as u8; 64], // Simulated chunk data
+                checksum: (i as u64) * 12345 + block.id as u64, // Simple checksum
+            });
+        }
+        
+        ErasureCodedBlock {
+            block,
+            chunks,
+            redundancy_level,
+            required_chunks,
+        }
+    }
+    
+    pub fn select_relay_nodes(&self, block_id: BlockId, erasure_block: &ErasureCodedBlock) -> Vec<RelayNode> {
+        let mut relay_nodes: Vec<RelayNode> = Vec::new();
+        let total_stake: StakeAmount = self.stake_distribution.values().sum();
+        
+        // Assign chunks to nodes based on stake weighting
+        for (i, chunk) in erasure_block.chunks.iter().enumerate() {
+            if let Some(node_id) = self.select_relay_node_for_chunk(chunk.chunk_id, total_stake) {
+                if let Some(existing_relay) = relay_nodes.iter_mut().find(|r| r.node_id == node_id) {
+                    existing_relay.assigned_chunks.push(chunk.chunk_id);
+                } else {
+                    let stake_weight = *self.stake_distribution.get(&node_id).unwrap_or(&0);
+                    relay_nodes.push(RelayNode {
+                        node_id,
+                        stake_weight,
+                        reliability_score: 0.95, // High reliability by default
+                        assigned_chunks: vec![chunk.chunk_id],
+                    });
+                }
+            }
+        }
+        
+        relay_nodes
+    }
+    
+    fn select_relay_node_for_chunk(&self, chunk_id: u32, total_stake: StakeAmount) -> Option<NodeId> {
+        // Stake-weighted selection with deterministic but distributed assignment
+        let seed = chunk_id as u64 * 12345; // Deterministic seed based on chunk
+        let target = seed % total_stake;
+        
+        let mut current_weight = 0;
+        for (&node_id, &stake) in &self.stake_distribution {
+            current_weight += stake;
+            if current_weight >= target {
+                return Some(node_id);
+            }
+        }
+        
+        self.nodes.first().copied() // Fallback
+    }
+    
+    pub fn can_reconstruct_block(&self, block_id: BlockId) -> bool {
+        if let Some(erasure_block) = self.erasure_coded_blocks.get(&block_id) {
+            let available_chunks: HashSet<u32> = self.chunk_availability
+                .iter()
+                .filter(|((bid, _), _)| *bid == block_id)
+                .map(|((_, chunk_id), _)| *chunk_id)
+                .collect();
+            
+            available_chunks.len() >= erasure_block.required_chunks
+        } else {
+            false
+        }
+    }
+    
+    pub fn propagate_chunks(&mut self, node_id: NodeId, erasure_block: &ErasureCodedBlock) {
+        // Update chunk availability based on relay assignments
+        if let Some(relay) = self.relay_assignments.get(&node_id) {
+            for &chunk_id in &relay.assigned_chunks {
+                self.chunk_availability
+                    .entry((erasure_block.block.id, chunk_id))
+                    .or_insert_with(HashSet::new)
+                    .insert(node_id);
+            }
+        }
+    }
+    
+    // Leader rotation methods
+    pub fn get_leader_for_slot(&self, slot: Slot) -> NodeId {
+        let window_position = ((slot - self.current_window.window_start) as usize) 
+            % self.current_window.leader_schedule.len();
+        self.current_window.leader_schedule[window_position]
+    }
+    
+    pub fn rotate_leader(&mut self, new_slot: Slot) {
+        let new_leader = self.get_leader_for_slot(new_slot);
+        self.leader_rotation.current_leader = new_leader;
+        self.leader_rotation.current_slot = new_slot;
+        self.leader_rotation.leader_history.push((new_slot, new_leader));
+        
+        // Limit history size
+        if self.leader_rotation.leader_history.len() > 100 {
+            self.leader_rotation.leader_history.remove(0);
+        }
+    }
+    
+    pub fn update_window(&mut self, new_slot: Slot, window_size: u32, finality_depth: u32) {
+        if new_slot >= self.current_window.window_start + self.current_window.window_size as u32 {
+            // Start new window
+            self.current_window = WindowInfo {
+                window_start: new_slot,
+                window_size,
+                finality_depth,
+                leader_schedule: self.generate_leader_schedule_for_window(new_slot),
+            };
+        }
+    }
+    
+    pub fn generate_leader_schedule_for_window(&self, window_start: Slot) -> Vec<NodeId> {
+        // Generate deterministic but varied leader schedule based on stake and slot
+        let mut schedule = self.nodes.clone();
+        let seed = window_start as u64;
+        
+        // Simple deterministic shuffle based on stake weights and slot
+        schedule.sort_by(|a, b| {
+            let weight_a = self.stake_distribution.get(a).unwrap_or(&0);
+            let weight_b = self.stake_distribution.get(b).unwrap_or(&0);
+            let hash_a = (seed.wrapping_mul(*weight_a as u64).wrapping_mul(*a as u64)) % 1000;
+            let hash_b = (seed.wrapping_mul(*weight_b as u64).wrapping_mul(*b as u64)) % 1000;
+            hash_b.cmp(&hash_a) // Higher hash first (stake-weighted randomness)
+        });
+        
+        schedule
+    }
+    
+    pub fn check_finalization_time_bounds(&self, slot: Slot) -> bool {
+        if let Some(&finalization_time) = self.finalization_times.get(&slot) {
+            let slot_start_time = slot as Timestamp * 1000; // Assume 1 second per slot
+            
+            // Calculate theoretical bounds
+            let delta_80 = 500; // 500ms for 80% responsive
+            let delta_60 = 1000; // 1000ms for 60% responsive  
+            let bound = std::cmp::min(delta_80, 2 * delta_60);
+            
+            let actual_time = finalization_time - slot_start_time;
+            actual_time <= bound
+        } else {
+            true // No finalization yet, so bounds not violated
+        }
     }
 }
 
@@ -1277,6 +1512,72 @@ impl Model for AlpenglowState {
                 new_state.economic_state.reward_rate = new_reward_rate;
                 new_state.economic_state.slashing_rate = new_slashing_rate;
             }
+            
+            // Rotor erasure coding actions
+            AlpenglowAction::PropagateErasureBlock { node, erasure_block } => {
+                new_state.erasure_coded_blocks.insert(erasure_block.block.id, erasure_block.clone());
+                let relay_nodes = new_state.select_relay_nodes(erasure_block.block.id, &erasure_block);
+                for relay in relay_nodes {
+                    new_state.relay_assignments.insert(relay.node_id, relay);
+                }
+                new_state.propagate_chunks(node, &erasure_block);
+            }
+            
+            AlpenglowAction::PropagateChunk { node, chunk, target_nodes } => {
+                // Update chunk availability for target nodes
+                for &target in &target_nodes {
+                    new_state.chunk_availability
+                        .entry((chunk.block_id, chunk.chunk_id))
+                        .or_insert_with(HashSet::new)
+                        .insert(target);
+                }
+            }
+            
+            AlpenglowAction::RequestMissingChunks { node, block_id, missing_chunks: _ } => {
+                // In practice, this would trigger chunk retrieval
+                // For formal verification, we just ensure the request is valid
+                if new_state.erasure_coded_blocks.contains_key(&block_id) {
+                    // Valid request - would trigger chunk propagation in real implementation
+                }
+            }
+            
+            AlpenglowAction::ReconstructBlock { node, block_id } => {
+                if new_state.can_reconstruct_block(block_id) {
+                    // Block can be reconstructed - mark as available to node
+                    if let Some(erasure_block) = new_state.erasure_coded_blocks.get(&block_id) {
+                        for chunk in &erasure_block.chunks {
+                            new_state.chunk_availability
+                                .entry((block_id, chunk.chunk_id))
+                                .or_insert_with(HashSet::new)
+                                .insert(node);
+                        }
+                    }
+                }
+            }
+            
+            AlpenglowAction::AssignRelayNodes { block_id, relay_assignments } => {
+                for relay in relay_assignments {
+                    new_state.relay_assignments.insert(relay.node_id, relay);
+                }
+            }
+            
+            // Leader rotation and windowing actions
+            AlpenglowAction::ProposeBlock { leader, slot, block, window } => {
+                // Verify leader is authorized for this slot
+                let expected_leader = new_state.get_leader_for_slot(slot);
+                if leader == expected_leader {
+                    // Valid proposal - could add to pending blocks
+                    new_state.current_slot = slot.max(new_state.current_slot);
+                }
+            }
+            
+            AlpenglowAction::RotateLeader { new_leader: _, slot } => {
+                new_state.rotate_leader(slot);
+            }
+            
+            AlpenglowAction::UpdateWindow { slot, window_size, finality_depth } => {
+                new_state.update_window(slot, window_size, finality_depth);
+            }
         }
         
         Some(new_state)
@@ -1365,6 +1666,57 @@ impl Model for AlpenglowState {
                                 }
                             }
                         }
+                    }
+                }
+                true
+            }),
+            
+            // Bounded finalization time: min(δ₈₀%, 2δ₆₀%)
+            Property::always("bounded_finalization_time", |_, state: &Self::State| {
+                // Check all finalized slots meet time bounds
+                for &slot in state.finalization_times.keys() {
+                    if !state.check_finalization_time_bounds(slot) {
+                        return false;
+                    }
+                }
+                true
+            }),
+            
+            // Rotor erasure coding availability
+            Property::always("erasure_block_availability", |_, state: &Self::State| {
+                // All erasure coded blocks should be reconstructible by honest nodes
+                for (&block_id, erasure_block) in &state.erasure_coded_blocks {
+                    let available_chunks: HashSet<u32> = state.chunk_availability
+                        .iter()
+                        .filter(|((bid, _), _)| *bid == block_id)
+                        .map(|((_, chunk_id), _)| *chunk_id)
+                        .collect();
+                    
+                    // Should have enough chunks for reconstruction
+                    if available_chunks.len() < erasure_block.required_chunks {
+                        return false;
+                    }
+                }
+                true
+            }),
+            
+            // Leader rotation fairness
+            Property::always("leader_rotation_fairness", |_, state: &Self::State| {
+                // Over time, all validators should get roughly equal chances to lead
+                if state.leader_rotation.leader_history.len() < 10 {
+                    return true; // Not enough history yet
+                }
+                
+                let mut leader_counts = HashMap::new();
+                for (_, leader) in &state.leader_rotation.leader_history {
+                    *leader_counts.entry(*leader).or_insert(0) += 1;
+                }
+                
+                // Check that no validator dominates (has >50% of slots)
+                let total_slots = state.leader_rotation.leader_history.len();
+                for &count in leader_counts.values() {
+                    if count > total_slots / 2 {
+                        return false;
                     }
                 }
                 true
@@ -1979,7 +2331,28 @@ impl AlpenglowModel {
     }
     
     pub fn next_state(&self, state: &AlpenglowState, action: AlpenglowAction) -> Option<AlpenglowState> {
-        // Use the Model trait implementation
+        // Use the Model trait implementation from AlpenglowState directly
+        use stateright::Model;
+        state.next_state(state, action)
+    }
+}
+
+impl stateright::Model for AlpenglowModel {
+    type State = AlpenglowState;
+    type Action = AlpenglowAction;
+
+    fn init_states(&self) -> Vec<Self::State> {
+        let nodes = vec![0, 1, 2];
+        let stake_dist = std::collections::HashMap::from([(0, 1000), (1, 1500), (2, 2000)]);
+        vec![AlpenglowState::new(nodes, stake_dist)]
+    }
+
+    fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
+        state.actions(state, actions);
+    }
+
+    fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
+        // Use the Model trait implementation from AlpenglowState
         use stateright::Model;
         state.next_state(state, action)
     }

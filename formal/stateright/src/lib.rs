@@ -17,3 +17,6 @@ mod tests_statistical;
 
 #[cfg(test)]
 mod tests_scalability;
+
+#[cfg(test)]
+mod tests_alpenglow_complete;
