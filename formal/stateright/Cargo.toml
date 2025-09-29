@@ -1,25 +1,26 @@
 [package]
 name = "alpenglow-stateright"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-authors = ["Alpenglow Formal Verification Team"]
-description = "Formal verification of Solana's Alpenglow consensus protocol using Stateright"
+authors = ["Alpenglow Team"]
+description = "Comprehensive formal verification suite for Alpenglow protocol"
 license = "Apache-2.0"
-repository = "https://github.com/username/alpenglow-formal"
+
+[[bin]]
+name = "alpenglow"
+path = "src/main.rs"
 
 [[bin]]
 name = "explorer"
 path = "src/bin/explorer.rs"
-
-[[example]]
-name = "advanced_byzantine"
-path = "examples/advanced_byzantine.rs"
 
 [dependencies]
 stateright = "0.31.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rand = "0.8"
+log = "0.4"
+env_logger = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }

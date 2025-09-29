@@ -127,7 +127,7 @@ fn test_packet_loss() {
         stake_distribution.insert(node, 100);
     }
     
-    let mut state = AlpenglowState::new(nodes, stake_distribution);
+    let state = AlpenglowState::new(nodes, stake_distribution);
     let model = state.clone();
     
     // Inject packet loss failure
